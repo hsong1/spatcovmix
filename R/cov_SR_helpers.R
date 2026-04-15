@@ -26,6 +26,7 @@ makeSigma_i <- function(distMat, alpha) {
 makeSigma_mLS_r <- function(beta, inds, allSigma_i) {
   # Sigma(theta) = sum_i Sigma(alpha_i) * theta_i
   # beta = theta[theta>0]; inds = which(theta>0)
+  stopifnot(length(inds) > 0)
   res <- lapply(1:length(inds), function(j) beta[j] * allSigma_i[[inds[j]]])
   res <- Reduce("+", res)
 
@@ -50,11 +51,7 @@ computeMY <- function(method, invSigma_np, X, Y) {
         0
       }
 
-    return(list(
-      P_theta = P_theta,
-      MY = P_theta %*% Y,
-      reml_penalty = reml_penalty
-    ))
+    return(list(P_theta = P_theta, MY = P_theta %*% Y, reml_penalty = reml_penalty))
   }
 }
 
@@ -83,7 +80,8 @@ computeTraceMats <- function(method, invSigma_np, X, allSigma_i, P_theta = NULL)
 objFun = function(
   method,
   X,
-  Y,
+  Y = NULL,
+  S = NULL,
   beta = NULL,
   inds = NULL,
   coords = NULL,
@@ -103,59 +101,39 @@ objFun = function(
 
   invSigma_np <- chol2inv(L)
   logdet <- 2 * sum(log(diag(L)))
+
+  if (!is.null(S)) {
+    return(0.5 * (logdet + sum(invSigma_np * S)))
+  }
+
   out <- computeMY(method, invSigma_np, X, Y)
-  return(
-    0.5 * (logdet + as.numeric(crossprod(Y, out$MY)) + out$reml_penalty)
-  )
+  return(0.5 * (logdet + as.numeric(crossprod(Y, out$MY)) + out$reml_penalty))
 }
 
-# nll_mLS_r = function(Sigma_np, Y, X, method) {
-#   # negative log likelihood value
-#   nll_val = tryCatch(
-#     {
-#       invSigma = solve(Sigma_np)
-#       logdet_Sigma = determinant(Sigma_np, logarithm = TRUE)$modulus
 
-#       if (method == "MeanZero") {
-#         quad_term = crossprod(Y, invSigma %*% Y)
-#         val = as.numeric((logdet_Sigma + quad_term) / 2)
-#       } else {
-#         invSigma_X <- invSigma %*% X
-#         Xt_invSigma_X <- t(X) %*% invSigma_X
-#         beta_hat <- solve(Xt_invSigma_X, t(invSigma_X) %*% Y)
-#         resid <- Y - X %*% beta_hat
-#         quad_term <- as.numeric(t(resid) %*% invSigma %*% resid)
-
-#         if (method == "REML") {
-#           logdet_X_Sigma_X <- as.numeric(
-#             determinant(Xt_invSigma_X, logarithm = TRUE)$modulus
-#           )
-#           val <- 0.5 * (logdet_Sigma + logdet_X_Sigma_X + quad_term)
-#         } else {
-#           # Profile ML
-#           val <- 0.5 * (logdet_Sigma + quad_term)
-#         }
-#       }
-#       return(val)
-#     },
-#     error = function(e) {
-#       return(10^8)
-#     }
-#   )
-#   return(nll_val)
-# }
-
-gradFun <- function(MY, allSigma_i, trace_M) {
+gradFun <- function(allSigma_i, trace_M, MY = NULL, S = NULL, invSigma_np = NULL) {
   # gradient of negative log-likelihood
   # grad[i] = 0.5 * (tr(trace_M%*%Sigma_i) - (MY)' Sigma_i (MY))
   s <- length(allSigma_i)
   grad <- numeric(s)
-  for (i in 1:s) {
-    trace_term <- sum(trace_M * allSigma_i[[i]])
-    grad[i] <- 0.5 * (trace_term - drop(crossprod(MY, allSigma_i[[i]] %*% MY)))
+
+  if (!is.null(S)) {
+    K <- invSigma_np %*% S %*% invSigma_np
+    for (i in 1:s) {
+      trace_term <- sum(trace_M * allSigma_i[[i]])
+      quad_term <- sum(K * allSigma_i[[i]])
+      grad[i] <- 0.5 * (trace_term - quad_term)
+    }
+  } else {
+    for (i in 1:s) {
+      trace_term <- sum(trace_M * allSigma_i[[i]])
+      quad_term <- as.numeric(crossprod(MY, allSigma_i[[i]] %*% MY))
+      grad[i] <- 0.5 * (trace_term - quad_term)
+    }
   }
-  grad
+  return(grad)
 }
+
 
 #minimize grad(beta_0)^{\top}(beta-\beta0)+(1/2)(beta-beta0)^\top H(beta-beta0)
 # over beta, subject to beta_i\geq 0, for each i
@@ -236,11 +214,12 @@ supportReduction_subproblem <- function(grad, XtXFun, beta0, inds, gradTrace = F
         #update XtX
 
         if (!cholesky) {
+          H <- XtX[inds, inds, drop = FALSE]
           betaNew <- tryCatch(
-            solve(XtX[inds, inds, drop = FALSE], Xtr[inds]),
+            solve(H, Xtr[inds]),
             error = function(e) {
-              warning("Singular Fisher information matrix, using pseudoinverse: ", conditionMessage(e))
-              MASS::ginv(XtX[inds, inds, drop = FALSE]) %*% Xtr[inds]
+              warning("Singular Fisher information matrix, solve H+tol*I: ", conditionMessage(e))
+              (H + 1e-6 * diag(nrow(H))) %*% Xtr[inds]
             }
           )
           #betaNew = solve(XtX[inds, inds, drop = FALSE], Xtr[inds])
@@ -301,7 +280,8 @@ supportReduction_subproblem <- function(grad, XtXFun, beta0, inds, gradTrace = F
     #update Hessian
     for (j in 1:s) {
       if (is.na(XtX[newIndex, j])) {
-        XtX[newIndex, j] = XtXFun(newIndex, j) / (s_alpha[newIndex] * s_alpha[j])
+        XtX[newIndex, j] = XtXFun(newIndex, j) /
+          (s_alpha[newIndex] * s_alpha[j])
         XtX[j, newIndex] = XtX[newIndex, j]
       }
     }

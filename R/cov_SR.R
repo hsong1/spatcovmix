@@ -1,15 +1,16 @@
 cov_SR <- function(
   coords,
-  Y,
-  X = matrix(1, nrow = length(Y), ncol = 1),
+  Y = NULL,
+  S = NULL,
+  X = NULL,
   method = c("REML", "ML", "MeanZero"),
   alphaGrid = NULL,
-  minEdist = 1 / length(Y), # minimum effective distance
+  minEdist = NULL, # minimum effective distance
   maxEdist = 0.9, # maximum effective distance
   gridScale = c("log", "equidist"),
   effThreshold = 1 / 20,
   lenAlphaGrid = 100,
-  tol = 1e-5,
+  tol = 1e-4,
   maxit = 100,
   print = FALSE,
   init = NULL
@@ -19,15 +20,40 @@ cov_SR <- function(
     cat("Method:", method, "| tol =", tol, "\n\n")
   }
 
+  # input validation
+  if (!is.null(S)) {
+    # when S is provided, we ignore Y and X and only use S for estimation
+    if (!is.null(Y)) {
+      stop("Provide either Y or S, not both")
+    }
+    if (method != "MeanZero") {
+      stop("S can only be used with method = 'MeanZero'")
+    }
+    S <- as.matrix(S)
+    if (nrow(S) != ncol(S)) {
+      stop("S must be a square matrix")
+    }
+    M <- nrow(S)
+  } else {
+    M <- length(Y)
+  }
+
+  if (is.null(X)) {
+    X <- matrix(1, nrow = M, ncol = 1)
+  }
+  if (is.null(minEdist)) {
+    minEdist <- 1 / M
+  }
+
   # check X contains an intercept column (all 1s)
-  if (!identical(method, "MeanZero")) {
+  if (method != "MeanZero") {
     has_intercept <- any(apply(X, 2, function(col) all(col == 1)))
     if (!has_intercept) stop("X must contain a column of 1s (intercept).")
   }
 
-  M = length(Y) # nobs
   obj_trace <- numeric(0)
 
+  # pairwise distances and s_h
   distances = as.matrix(dist(coords))
   s_h = max(distances)
 
@@ -58,7 +84,11 @@ cov_SR <- function(
   if (is.null(init)) {
     # if not provided, pointmass at 0 with weight var(Y)
     inds = which(alphaGrid == 0)
-    beta = var(Y)
+    beta <- if (method == "MeanZero") {
+      if (!is.null(S)) sum(diag(S)) / M else sum(Y^2) / M
+    } else {
+      var(Y)
+    }
   } else {
     stopifnot(all(init >= 0))
     stopifnot(length(init) == length(alphaGrid))
@@ -85,8 +115,24 @@ cov_SR <- function(
     invSigma_np <- chol2inv(L)
     logdet <- 2 * sum(log(diag(L)))
 
-    out <- computeMY(method, invSigma_np, X, Y)
-    ll0 <- 0.5 * (logdet + out$reml_penalty + as.numeric(crossprod(Y, out$MY)))
+    # function value: 0.5*(logdet(Sigma) + reml_penalty + Y'MY)
+    # MY = invSigma_np Y for MeanZero, P_theta Y for ML/REML.
+
+    if (!is.null(S)) {
+      out <- list(P_theta = NULL, MY = NULL, reml_penalty = 0)
+      quad_term <- sum(invSigma_np * S)
+    } else {
+      out <- computeMY(method, invSigma_np, X, Y)
+      quad_term <- as.numeric(crossprod(Y, out$MY))
+    }
+    ll0 <- 0.5 * (logdet + out$reml_penalty + quad_term)
+
+    # gradient: 0.5*(tr(trace_M %*% Sigma_i) - (MY)'Sigma_i MY) for i = 1,...,s
+    # trace_M = invSigma_np for MeanZero and ML, P_theta for REML
+    trace_M <- if (method == "REML") out$P_theta else invSigma_np
+    grad <- gradFun(allSigma_i = allSigma_i, trace_M = trace_M, MY = out$MY, S = S, invSigma_np = invSigma_np) # current gradient
+
+    # hessian
     all_trace_mats <- computeTraceMats(
       method = method,
       invSigma_np = invSigma_np,
@@ -94,8 +140,7 @@ cov_SR <- function(
       allSigma_i = allSigma_i,
       P_theta = out$P_theta
     ) # for computing I(theta)
-    trace_M <- if (method == "REML") out$P_theta else invSigma_np
-    grad <- gradFun(MY = out$MY, allSigma_i = allSigma_i, trace_M = trace_M) # current gradient
+
     XtXFun <- function(i, j) {
       0.5 * sum(all_trace_mats[[i]] * t(all_trace_mats[[j]]))
     } # Hessian functions
@@ -104,7 +149,7 @@ cov_SR <- function(
     res = supportReduction_subproblem(
       grad = grad,
       XtXFun = XtXFun,
-      beta = beta,
+      beta0 = beta,
       inds = inds
     )
 
@@ -129,13 +174,9 @@ cov_SR <- function(
       wTemp = w + alpha * step # candidate step
 
       # compute objective value at wTemp
-      Sigma_wTemp <- makeSigma_mLS_r(
-        wTemp[which(wTemp > 0)],
-        which(wTemp > 0),
-        allSigma_i
-      )
+      Sigma_wTemp <- makeSigma_mLS_r(beta = wTemp[which(wTemp > 0)], inds = which(wTemp > 0), allSigma_i = allSigma_i)
       L_wTemp <- chol(Sigma_wTemp)
-      ll1 <- objFun(method = method, X = X, Y = Y, L = L_wTemp)
+      ll1 <- objFun(method = method, X = X, Y = Y, S = S, L = L_wTemp)
 
       # Armijo condition: sufficient decrease from ll0
       if ((ll1 - ll0) <= alpha * c * m) {
@@ -155,14 +196,12 @@ cov_SR <- function(
 
         # projGrad
         invSigma_wTemp <- chol2inv(L_wTemp)
-        out <- computeMY(
-          method = method,
-          invSigma_np = invSigma_wTemp,
-          X = X,
-          Y = Y
-        )
+        out <- list(P_theta = NULL, MY = NULL, reml_penalty = 0)
+        if (is.null(S)) {
+          out <- computeMY(method = method, invSigma_np = invSigma_wTemp, X = X, Y = Y)
+        }
         trace_M <- if (method == "REML") out$P_theta else invSigma_wTemp
-        grad <- gradFun(MY = out$MY, allSigma_i = allSigma_i, trace_M = trace_M)
+        grad <- gradFun(allSigma_i = allSigma_i, trace_M = trace_M, MY = out$MY, S = S, invSigma_np = invSigma_wTemp)
         projGrad <- grad * (w > 0) + grad * (grad < 0) * (w == 0)
 
         if (print) {
