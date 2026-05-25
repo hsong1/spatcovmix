@@ -1,3 +1,4 @@
+#'@export
 cov_SR <- function(
   coords,
   Y = NULL,
