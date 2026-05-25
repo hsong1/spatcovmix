@@ -175,8 +175,13 @@ cov_SR <- function(
 
       # compute objective value at wTemp
       Sigma_wTemp <- makeSigma_mLS_r(beta = wTemp[which(wTemp > 0)], inds = which(wTemp > 0), allSigma_i = allSigma_i)
-      L_wTemp <- chol(Sigma_wTemp)
-      ll1 <- objFun(method = method, X = X, Y = Y, S = S, L = L_wTemp)
+      # if chol(Sigma_wTemp) fails, we set objective to Inf and reduce step size
+      L_wTemp <- tryCatch(chol(Sigma_wTemp), error = function(e) NULL)
+      if (is.null(L_wTemp)) {
+        ll1 <- Inf
+      } else {
+        ll1 <- objFun(method = method, X = X, Y = Y, S = S, L = L_wTemp)
+      }
 
       # Armijo condition: sufficient decrease from ll0
       if ((ll1 - ll0) <= alpha * c * m) {
