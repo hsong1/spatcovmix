@@ -97,9 +97,11 @@ objFun = function(
     stopifnot(!is.null(coords), !is.null(alphaGrid), !is.null(beta), !is.null(inds))
     distances <- as.matrix(dist(coords))
     s_h <- max(distances)
-    allSigma_i <- lapply(alphaGrid, function(a) {
-      makeSigma_i(distances / s_h, a / s_h)
-    })
+    repeated <- nrow(unique(as.data.frame(coords))) < nrow(coords)
+    D_scaled <- distances / s_h
+    alpha_scaled <- alphaGrid / s_h
+    ascaled_iter <- if (repeated) c(alpha_scaled, -1) else alpha_scaled
+    allSigma_i <- lapply(ascaled_iter, function(a) makeSigma_i(D_scaled, a))
     Sigma_np <- makeSigma_mLS_r(beta, inds, allSigma_i)
     L <- chol(Sigma_np)
   }
@@ -245,16 +247,16 @@ supportReduction_subproblem <- function(grad, XtXFun, beta0, inds, gradTrace = F
         # Mass(t) = (1-t)(currentMass) + t newMass ( t=0: old; t=1: new )
         # largest 0<=t<=1 to make Mass(t)>=0 for all K?
 
-        t = -current / (betaNew - current)
-        t = t[-length(t)]
-        # t[t<0] = -Inf; t[t>1] = -Inf
-        # t = t[which.max(t)]
-        t[t < 0] = Inf
-        t[t > 1] = Inf
-        t_star = unique(t[which.min(t)])
+        t <- rep(Inf, length(current))
+        negative <- (betaNew < 0) # only negative weight imposes a constraint on t
+        # for each k, t_k <= current_k / (current_k - betaNew_k)
+        t[negative] <- current[negative] / (current[negative] - betaNew[negative])
+
+        t_star <- min(1, t) # smallest t_k; if no constraint we can take the full step
         current = (1 - t_star) * current + t_star * betaNew
-        inds = inds[-which.min(t)]
-        current = current[-which.min(t)]
+
+        inds = inds[current>0]
+        current = current[current>0]
       }
     }
 
