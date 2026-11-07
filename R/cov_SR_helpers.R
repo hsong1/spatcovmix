@@ -15,13 +15,18 @@ makeSigma_i <- function(distMat, alpha) {
   # (Sigma_i)[l,m] = exp(-h_lm^2/alpha^2)
 
   if (alpha == 0) {
-    out <- diag(nrow = dim(distMat)[1]) # In = identity matrix with n = nrow(dist_mat)
-  } else {
+    out <- 1 * (distMat == 0)
+  } else if (alpha >0) {
     out <- exp(-(distMat / alpha)^2)
+  } else if (alpha <0){
+    # this is for the repeated measure variance
+    out <- diag(nrow = dim(distMat)[1]) # I_M = identity matrix with M = nrow(dist_mat)
+
+  }else{
+    stop("should not be executed")
   }
   return(out)
 }
-
 
 makeSigma_mLS_r <- function(beta, inds, allSigma_i) {
   # Sigma(theta) = sum_i Sigma(alpha_i) * theta_i
@@ -219,7 +224,7 @@ supportReduction_subproblem <- function(grad, XtXFun, beta0, inds, gradTrace = F
             solve(H, Xtr[inds]),
             error = function(e) {
               warning("Singular Fisher information matrix, solve H+tol*I: ", conditionMessage(e))
-              (H + 1e-6 * diag(nrow(H))) %*% Xtr[inds]
+              solve(H + 1e-6 * diag(nrow(H)), Xtr[inds])
             }
           )
           #betaNew = solve(XtX[inds, inds, drop = FALSE], Xtr[inds])

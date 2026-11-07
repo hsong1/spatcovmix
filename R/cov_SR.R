@@ -39,11 +39,17 @@ cov_SR <- function(
     M <- length(Y)
   }
 
+  if (nrow(coords) != M) {
+    stop("nrow(coords) needs to be the same as length(Y)")
+  }
+  M_loc <- nrow(unique(as.data.frame(coords))) # number of unique locations
+  repeated <- (M_loc < M)  
+
   if (is.null(X)) {
     X <- matrix(1, nrow = M, ncol = 1)
   }
   if (is.null(minEdist)) {
-    minEdist <- 1 / M
+    minEdist <- 1 / M_loc
   }
 
   # check X contains an intercept column (all 1s)
@@ -57,10 +63,16 @@ cov_SR <- function(
   # pairwise distances and s_h
   distances = as.matrix(dist(coords))
   s_h = max(distances)
+  if (s_h <= 0) {
+    stop("coords must contain at least two distinct locations")
+  }
 
   # alphaGrid setup
   if (is.null(alphaGrid)) {
-    # [0, minEdist*s_h/sqrt(-log(effThreshold)),...,maxEdist*s_h/sqrt(-log(effThreshold)) ]
+    # alpha_min = first positive-scale kernel drops to effThreshold at h=minEdist*s_h
+    # alpha_max = last kernel drops to effThreshold at h=maxEdist*s_h
+    # [0, alpha_min = minEdist*s_h/sqrt(-log(effThreshold)),...,alpha_max= maxEdist*s_h/sqrt(-log(effThreshold)) ]
+    stopifnot(lenAlphaGrid>=3)
     alphaGrid <- makeAlphaGrid(
       minEdist,
       maxEdist,
@@ -77,14 +89,30 @@ cov_SR <- function(
     if (!(any(alphaGrid == 0))) {
       stop("alphaGrid must contain 0")
     }
+
+    if (any(alphaGrid < 0)) {
+      stop("alphaGrid must contain nonnegative scales")
+    }
   }
 
-  s = length(alphaGrid) # grid size
+  # precompute Sigma_i
+  # when repeated=T, sigma_e^2 can be estimated separately; last matrix is I_M
+
+  # n_params = length(alphaGrid) when not repeated, 
+  # length(alphaGrid)+1 (for sigma_e2) when repeated
+  n_params <- if(repeated) length(alphaGrid)+1L else length(alphaGrid)
+
+  # compute allSigma_i
+  D_scaled <- distances / s_h
+  alpha_scaled <- alphaGrid / s_h
+  ascaled_iter = if(repeated) c(alpha_scaled,-1) else alpha_scaled
+  allSigma_i <- lapply(ascaled_iter, function(a) makeSigma_i(D_scaled, a))
+  sigma_e2_index <- if(repeated) length(allSigma_i) else NULL 
 
   # weight initialization
   if (is.null(init)) {
-    # if not provided, pointmass at 0 with weight var(Y)
-    inds = which(alphaGrid == 0)
+    # if not provided, use I_M with weight var(Y)
+    inds = if (repeated) sigma_e2_index else which(alphaGrid == 0)
     beta <- if (method == "MeanZero") {
       if (!is.null(S)) sum(diag(S)) / M else sum(Y^2) / M
     } else {
@@ -92,15 +120,10 @@ cov_SR <- function(
     }
   } else {
     stopifnot(all(init >= 0))
-    stopifnot(length(init) == length(alphaGrid))
+    stopifnot(length(init) == n_params)
     inds = which(init > 0)
     beta = init[inds]
   }
-
-  # precompute Sigma_i for i = 1,...,s
-  allSigma_i <- lapply(1:length(alphaGrid), function(i) {
-    makeSigma_i(distances / s_h, alphaGrid[i] / s_h)
-  })
 
   # main loop
   iteration = 1
@@ -128,7 +151,7 @@ cov_SR <- function(
     }
     ll0 <- 0.5 * (logdet + out$reml_penalty + quad_term)
 
-    # gradient: 0.5*(tr(trace_M %*% Sigma_i) - (MY)'Sigma_i MY) for i = 1,...,s
+    # gradient: 0.5*(tr(trace_M %*% Sigma_i) - (MY)'Sigma_i MY) for i = 1,...,n_params
     # trace_M = invSigma_np for MeanZero and ML, P_theta for REML
     trace_M <- if (method == "REML") out$P_theta else invSigma_np
     grad <- gradFun(allSigma_i = allSigma_i, trace_M = trace_M, MY = out$MY, S = S, invSigma_np = invSigma_np) # current gradient
@@ -155,8 +178,8 @@ cov_SR <- function(
     )
 
     # line search
-    w = rep(0, s)
-    wNew = rep(0, s)
+    w = rep(0, n_params)
+    wNew = rep(0, n_params)
     w[inds] = beta # current beta
     wNew[res$active_inds] = res$beta # new beta after supportReduction
 
@@ -221,11 +244,13 @@ cov_SR <- function(
           )
         }
 
-        # convergence: relative decrease in objective below tolerance
-        #if (abs(-(ll1 - ll0) / M) <= tol) {
+        # convergence: maximum absolute projected gradient per observation below tolerance
         if (max(abs(projGrad) / M) <= tol) {
           conv = TRUE
-          mu <- list(support = alphaGrid[w > 0], weights = w[w > 0])
+          mu_Z_weights <- w[1:length(alphaGrid)]
+          mu <- list(
+            support = alphaGrid[mu_Z_weights > 0], 
+            weights = mu_Z_weights[mu_Z_weights > 0])
 
           # return output
           return(list(
@@ -234,6 +259,9 @@ cov_SR <- function(
             alphaGrid = alphaGrid,
             alphaGridScaled = alphaGrid / s_h,
             params = w,
+            theta0 = mu_Z_weights[alphaGrid == 0],
+            sigma_e2 = if (repeated) w[sigma_e2_index] else NA,
+            repeated = repeated,
             objective = ll1 / M,
             obj_trace = obj_trace / M,
             projGrad = projGrad / M,
@@ -250,7 +278,9 @@ cov_SR <- function(
 
   warning("maxit reached without convergence")
   inds <- which(w > 0)
-  mu <- list(support = alphaGrid[w > 0], weights = w[w > 0])
+  mu_Z_weights <- w[1:length(alphaGrid)]
+  mu <- list(support = alphaGrid[mu_Z_weights > 0], 
+    weights = mu_Z_weights[mu_Z_weights > 0])
 
   return(list(
     mu = mu,
@@ -258,6 +288,9 @@ cov_SR <- function(
     alphaGrid = alphaGrid,
     alphaGridScaled = alphaGrid / s_h,
     params = w,
+    theta0 = mu_Z_weights[alphaGrid == 0],
+    sigma_e2 = if (repeated) w[sigma_e2_index] else NA,
+    repeated = repeated,
     objective = ll1 / M,
     obj_trace = obj_trace / M,
     projGrad = projGrad / M,
