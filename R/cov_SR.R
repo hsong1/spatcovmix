@@ -235,62 +235,53 @@ cov_SR <- function(
 
         if (print) {
           # cat(abs((ll1 - ll0) / M), "\n\n")
-          cat(
-            "obj decrease:",
-            abs((ll1 - ll0) / M),
-            "| maxGrad:",
-            max(abs(projGrad)) / M,
-            "\n"
-          )
+          cat("obj decrease:", abs((ll1 - ll0) / M), "| maxGrad:", max(abs(projGrad)) / M, "\n")
         }
 
         # convergence: maximum absolute projected gradient per observation below tolerance
         if (max(abs(projGrad) / M) <= tol) {
           conv = TRUE
-          mu_Z_weights <- w[1:length(alphaGrid)]
-          mu <- list(
-            support = alphaGrid[mu_Z_weights > 0], 
-            weights = mu_Z_weights[mu_Z_weights > 0])
-
-          # return output
-          return(list(
-            mu = mu,
-            inds = inds,
-            alphaGrid = alphaGrid,
-            alphaGridScaled = alphaGrid / s_h,
-            params = w,
-            theta0 = mu_Z_weights[alphaGrid == 0],
-            sigma_e2 = if (repeated) w[sigma_e2_index] else NA,
-            repeated = repeated,
-            objective = ll1 / M,
-            obj_trace = obj_trace / M,
-            projGrad = projGrad / M,
-            converged = conv
-          ))
+          break # exits line search
         }
       }
 
       # step rejected
       alpha = alpha / 2 # reduce stepsize
       lsCount = lsCount + 1 # increment lineSearch Count
-    }
+    } # end line search
+    
+    if (conv) break # exits optimization
   }
 
-  warning("maxit reached without convergence")
+  if (!conv) warning("maxit reached without convergence")
   inds <- which(w > 0)
   mu_Z_weights <- w[1:length(alphaGrid)]
   mu <- list(support = alphaGrid[mu_Z_weights > 0], 
     weights = mu_Z_weights[mu_Z_weights > 0])
 
+  # fixed effects
+  if (method!="MeanZero"){
+    invSigma_X <- invSigma_wTemp %*% X
+    Xt_invSigma_X <- crossprod(X, invSigma_X)
+    regression_fit <- list(
+      regression_coef = solve(Xt_invSigma_X, crossprod(invSigma_X, Y)),
+      regression_vcov = solve(Xt_invSigma_X)
+    )
+  } else{
+    regression_fit = NULL
+  }
+
   return(list(
     mu = mu,
+    regression_fit = regression_fit,
+    method = method,
+    params = w,
+    theta0 = mu_Z_weights[alphaGrid == 0],
+    sigma_e2 = if (repeated) w[sigma_e2_index] else NULL,
+    repeated = repeated,
     inds = inds,
     alphaGrid = alphaGrid,
     alphaGridScaled = alphaGrid / s_h,
-    params = w,
-    theta0 = mu_Z_weights[alphaGrid == 0],
-    sigma_e2 = if (repeated) w[sigma_e2_index] else NA,
-    repeated = repeated,
     objective = ll1 / M,
     obj_trace = obj_trace / M,
     projGrad = projGrad / M,
