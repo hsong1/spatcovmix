@@ -276,7 +276,7 @@ cov_SR <- function(
     regression_fit = regression_fit,
     method = method,
     params = w,
-    theta0 = mu_Z_weights[alphaGrid == 0],
+    weight_at_zero = mu_Z_weights[alphaGrid == 0],
     sigma_e2 = if (repeated) w[sigma_e2_index] else NULL,
     repeated = repeated,
     inds = inds,
