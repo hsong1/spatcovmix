@@ -89,7 +89,7 @@ p <- ggplot(result_long, aes(h, C, color = Method, linetype = Method)) +
   scale_linetype_manual(
     values = c(True = "solid", REML = "dashed", ML = "dotdash", MeanZero = "dotted")
   ) +
-  labs(title = "cov_SR: Estimated vs. True Covariance Function", x = "Distance  h", y = "C(h)") +
+  labs(title = "Estimated vs. True Covariance Function", x = "Distance  h", y = "C(h)") +
   theme_bw(base_size = 13) +
   theme(legend.position = "right")
 
